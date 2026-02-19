@@ -1,0 +1,284 @@
+# ============================================
+# CELLA 3: LOGIN E SALVA COOKIES (CORRETTA)
+# ============================================
+
+import getpass
+from playwright.async_api import async_playwright
+import asyncio
+import json
+from pathlib import Path
+
+print("🔐 CONFIGURAZIONE LOGIN DIGEN.AI")
+print("="*60)
+print("Inserisci le credenziali del tuo account Digen.ai")
+print("(Se non hai account, creane uno su https://digen.ai)")
+print("="*60)
+print()
+
+EMAIL = input("📧 Email: ")
+PASSWORD = getpass.getpass("🔒 Password: ")
+
+print("\n✅ Credenziali salvate!")
+print("\n🔄 Eseguo login e salvo sessione...")
+
+async def save_login():
+    cookies_file = Path("digen_cookies.json")
+    debug_folder = Path("debug_screenshots")
+    debug_folder.mkdir(exist_ok=True)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage']
+        )
+        context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        )
+        page = await context.new_page()
+
+        try:
+            print("🌐 Apertura pagina login...")
+            await page.goto("https://digen.ai/signin", timeout=30000)
+            await asyncio.sleep(5)
+
+            # Screenshot iniziale
+            await page.screenshot(path=debug_folder / "1_login_page.png", full_page=True)
+            print("📸 Screenshot pagina: debug_screenshots/1_login_page.png")
+
+            # ✅ NUOVO: Usa selettori più flessibili per trovare i campi
+            print("🔍 Cerco campo email...")
+
+            # Prova tutti questi selettori
+            email_selectors = [
+                'input[placeholder*="email" i]',
+                'input[placeholder*="Email" i]',
+                'input[placeholder*="tua email" i]',
+                'input[type="email"]',
+                'input[name="email"]',
+                '#email',
+                'input[aria-label*="email" i]',
+                'input:not([type="password"])',  # Primo input che non è password
+            ]
+
+            email_field = None
+            for selector in email_selectors:
+                try:
+                    count = await page.locator(selector).count()
+                    if count > 0:
+                        email_field = page.locator(selector).first
+                        print(f"✅ Campo email trovato con: {selector}")
+                        break
+                except:
+                    continue
+
+            if not email_field:
+                # Fallback: prendi il primo input visibile
+                try:
+                    all_inputs = await page.locator('input:visible').all()
+                    if len(all_inputs) >= 2:
+                        email_field = all_inputs[0]
+                        print(f"✅ Campo email trovato (primo input visibile)")
+                except:
+                    pass
+
+            if not email_field:
+                print("❌ Campo email non trovato!")
+                print("📋 Prova questi metodi alternativi:")
+                print("   1. Usa 'Continua con Google' invece")
+                print("   2. Esporta cookies manualmente da browser")
+                return False
+
+            print(f"📧 Inserisco email: {EMAIL}")
+            await email_field.click()
+            await asyncio.sleep(0.5)
+            await email_field.fill(EMAIL)
+            await asyncio.sleep(1)
+
+            # Screenshot dopo email
+            await page.screenshot(path=debug_folder / "2_email_filled.png", full_page=True)
+
+            print("🔍 Cerco campo password...")
+
+            # Prova tutti questi selettori per password
+            password_selectors = [
+                'input[type="password"]',
+                'input[placeholder*="password" i]',
+                'input[placeholder*="Password" i]',
+                'input[name="password"]',
+                '#password',
+                'input[aria-label*="password" i]',
+            ]
+
+            password_field = None
+            for selector in password_selectors:
+                try:
+                    count = await page.locator(selector).count()
+                    if count > 0:
+                        password_field = page.locator(selector).first
+                        print(f"✅ Campo password trovato con: {selector}")
+                        break
+                except:
+                    continue
+
+            if not password_field:
+                # Fallback: prendi il secondo input visibile
+                try:
+                    all_inputs = await page.locator('input:visible').all()
+                    if len(all_inputs) >= 2:
+                        password_field = all_inputs[1]
+                        print(f"✅ Campo password trovato (secondo input visibile)")
+                except:
+                    pass
+
+            if not password_field:
+                print("❌ Campo password non trovato!")
+                return False
+
+            print("🔒 Inserisco password...")
+            await password_field.click()
+            await asyncio.sleep(0.5)
+            await password_field.fill(PASSWORD)
+            await asyncio.sleep(1)
+
+            # Screenshot form completo
+            await page.screenshot(path=debug_folder / "3_form_filled.png", full_page=True)
+            print("📸 Screenshot form compilato")
+
+            print("🔍 Cerco bottone submit...")
+
+            # Prova tutti questi selettori per il bottone
+            submit_selectors = [
+                'button:has-text("Accedi")',
+                'button:has-text("accedi")',
+                'button:has-text("ACCEDI")',
+                'button:has-text("Sign in")',
+                'button:has-text("Login")',
+                'button:has-text("Log in")',
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:visible:not(:has-text("Google"))',  # Bottone che non dice "Google"
+            ]
+
+            submit_btn = None
+            for selector in submit_selectors:
+                try:
+                    count = await page.locator(selector).count()
+                    if count > 0:
+                        submit_btn = page.locator(selector).first
+                        print(f"✅ Bottone trovato con: {selector}")
+                        break
+                except:
+                    continue
+
+            if not submit_btn:
+                # Fallback: cerca qualsiasi bottone blu visibile
+                try:
+                    all_buttons = await page.locator('button:visible').all()
+                    for btn in all_buttons:
+                        text = await btn.inner_text()
+                        if text and "google" not in text.lower():
+                            submit_btn = btn
+                            print(f"✅ Bottone trovato: {text}")
+                            break
+                except:
+                    pass
+
+            if not submit_btn:
+                print("❌ Bottone submit non trovato!")
+                return False
+
+            print("🖱️ Clicco submit...")
+            await submit_btn.click()
+
+            print("⏳ Attendo risposta (8 secondi)...")
+            await asyncio.sleep(8)
+
+            # Screenshot dopo submit
+            await page.screenshot(path=debug_folder / "4_after_submit.png", full_page=True)
+            print("📸 Screenshot dopo submit")
+
+            # Verifica URL
+            current_url = page.url
+            print(f"📍 URL attuale: {current_url}")
+
+            # Controlla se siamo ancora sulla pagina di login
+            if "signin" in current_url or "login" in current_url:
+                print("\n⚠️ Ancora sulla pagina login!")
+
+                # Controlla se ci sono messaggi di errore
+                try:
+                    error_text = await page.locator('text=/error|errore|incorrect|sbagliato/i').first.text_content(timeout=2000)
+                    print(f"   Errore visibile: {error_text}")
+                except:
+                    pass
+
+                print("\n❌ Login fallito!")
+                print("   Possibili cause:")
+                print("   • Credenziali errate")
+                print("   • Captcha/Verifica richiesta")
+                print("   • Rate limit")
+                print("\n📸 Controlla gli screenshot in debug_screenshots/")
+                return False
+
+            # Login riuscito! Salva cookies
+            cookies = await context.cookies()
+
+            if len(cookies) < 1:
+                print("⚠️ Nessun cookie ricevuto (strano...)")
+                # Ma proviamo comunque a salvare
+
+            with open(cookies_file, 'w') as f:
+                json.dump(cookies, f, indent=2)
+
+            print(f"\n✅ LOGIN RIUSCITO!")
+            print(f"💾 Salvati {len(cookies)} cookies")
+            print(f"📝 File: digen_cookies.json")
+
+            # Mostra alcuni cookies (senza valori sensibili)
+            print(f"\n🍪 Cookies salvati:")
+            for cookie in cookies[:5]:
+                print(f"   • {cookie['name']} (domain: {cookie['domain']})")
+            if len(cookies) > 5:
+                print(f"   ... e altri {len(cookies)-5}")
+
+            return True
+
+        except Exception as e:
+            print(f"\n❌ ERRORE: {e}")
+            try:
+                await page.screenshot(path=debug_folder / "error.png", full_page=True)
+                print("📸 Screenshot errore salvato")
+            except:
+                pass
+            return False
+
+        finally:
+            await browser.close()
+
+# Esegui login
+success = await save_login()
+
+if success:
+    print("\n" + "="*60)
+    print("🎉 SETUP COMPLETATO!")
+    print("="*60)
+    print("\n💡 Ora esegui la CELLA 4 per generare i video!")
+    print("   I cookies verranno riutilizzati automaticamente")
+else:
+    print("\n" + "="*60)
+    print("❌ SETUP FALLITO")
+    print("="*60)
+    print("\n📋 METODI ALTERNATIVI:")
+    print("\n1️⃣ LOGIN CON GOOGLE (più facile):")
+    print("   • Vai su https://digen.ai")
+    print("   • Clicca 'Continua con Google'")
+    print("   • Esporta cookies con extension browser")
+    print("\n2️⃣ ESPORTA COOKIES MANUALMENTE:")
+    print("   • Installa 'EditThisCookie' (Chrome extension)")
+    print("   • Fai login manualmente su digen.ai")
+    print("   • Esporta cookies")
+    print("   • Carica su Colab come digen_cookies.json")
+    print("\n3️⃣ PROVA DI NUOVO:")
+    print("   • Verifica email/password corrette")
+    print("   • Riesegui questa cella")

@@ -1,0 +1,15 @@
+# CELLA 2: Installazione dipendenze
+print("⚙️ Installazione dipendenze in corso...")
+
+# Installa browser e driver
+!apt-get update -qq > /dev/null 2>&1
+!apt-get install -y chromium-browser chromium-chromedriver > /dev/null 2>&1
+
+# Installa librerie Python
+!pip install -q playwright pandas openpyxl
+
+# Installa browser Playwright
+!playwright install chromium
+!playwright install-deps
+
+print("✅ Installazione completata!")

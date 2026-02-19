@@ -1,0 +1,69 @@
+# ============================================
+# CELLA 1: Upload File Excel (qualsiasi nome)
+# ============================================
+
+from google.colab import files
+from pathlib import Path
+import shutil
+
+print("📤 CARICA IL TUO FILE EXCEL")
+print("="*60)
+print("Può avere qualsiasi nome (es: video.xlsx, prompts.xlsx, etc.)")
+print("Struttura richiesta:")
+print("  • Colonna 'Prompt' → Testo del prompt")
+print("  • Colonna 'NomeFile' → Nome video (senza .mp4)")
+print("="*60)
+print()
+
+uploaded = files.upload()
+
+if not uploaded:
+    print("❌ Nessun file caricato!")
+else:
+    # Prendi il primo file caricato
+    filename = list(uploaded.keys())[0]
+
+    # Verifica che sia un Excel
+    if not (filename.endswith('.xlsx') or filename.endswith('.xls')):
+        print(f"❌ File '{filename}' non è un Excel!")
+        print("   Carica un file .xlsx o .xls")
+    else:
+        # Rinomina in prompts.xlsx per compatibilità con script
+        if filename != 'prompts.xlsx':
+            shutil.copy(filename, 'prompts.xlsx')
+            print(f"✅ File '{filename}' caricato e rinominato in 'prompts.xlsx'")
+        else:
+            print(f"✅ File '{filename}' caricato!")
+
+        # Mostra preview
+        import pandas as pd
+        try:
+            df = pd.read_excel('prompts.xlsx')
+            total = len(df)
+            print(f"\n📊 CONTENUTO FILE:")
+            print(f"   • Righe totali: {total}")
+
+            if 'Prompt' in df.columns and 'NomeFile' in df.columns:
+                print(f"   • Colonne trovate: ✅ Prompt, ✅ NomeFile")
+                print(f"\n📋 PREVIEW (primi 3):")
+                for i, row in df.head(3).iterrows():
+                    prompt_preview = str(row['Prompt'])[:50]
+                    if len(str(row['Prompt'])) > 50:
+                        prompt_preview += "..."
+                    print(f"   {i+1}. {row['NomeFile']}")
+                    print(f"      → {prompt_preview}")
+                if total > 3:
+                    print(f"   ... e altri {total-3} prompt")
+            else:
+                print(f"   ⚠️ ATTENZIONE: Colonne non corrette!")
+                print(f"   Colonne trovate: {', '.join(df.columns)}")
+                print(f"   Colonne richieste: 'Prompt', 'NomeFile'")
+        except Exception as e:
+            print(f"⚠️ Errore lettura file: {e}")
+
+        print("\n" + "="*60)
+        print("✅ PRONTO! Ora puoi eseguire:")
+        print("   • CELLA 3 → Login (solo prima volta)")
+        print("   • CELLA 4 → Genera video")
+        print("="*60)
+

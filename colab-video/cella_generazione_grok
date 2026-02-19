@@ -1,0 +1,868 @@
+# ============================================
+# CELLA 4: GENERAZIONE VIDEO - GROK (Space 44998)
+# ============================================
+
+from google.colab import drive
+try:
+    drive.mount('/content/drive')
+except:
+    print("Drive già montato")
+
+import pandas as pd
+from playwright.async_api import async_playwright
+import asyncio
+import json
+from pathlib import Path
+from collections import defaultdict
+
+# ⚙️ CONFIGURAZIONE
+MODEL = "grok"
+BATCH_SIZE = 2
+PAUSE_BETWEEN_PROMPTS = 20
+MAX_DOWNLOAD_RETRIES = 2
+MAX_GENERATION_WAIT = 500
+DOWNLOAD_FOLDER_NAME = "video_generati_grok"
+
+DURATION = "6s"
+ASPECT_RATIO = "3:2"
+RESOLUTION = "1080P"
+
+# 🐞 Debug (metti True per vedere tutti i dettagli)
+DEBUG_MODE = False
+
+async def automate_digen_grok_batch():
+    BASE_URL = "https://digen.ai/en/space/44998"
+    print(f"🎬 Modalità: {MODEL.upper()} - Space 44998")
+    print(f"⚙️ Configurazione: {DURATION}, {ASPECT_RATIO}, {RESOLUTION}\n")
+
+    print("📂 Lettura file Excel...")
+    df = pd.read_excel('prompts.xlsx')
+    total_prompts = len(df)
+    print(f"✅ Trovati {total_prompts} prompt\n")
+
+    download_folder = Path(f"/content/drive/MyDrive/{DOWNLOAD_FOLDER_NAME}")
+    download_folder.mkdir(exist_ok=True, parents=True)
+    print(f"📁 Cartella download: {download_folder}\n")
+
+    cookies_file = Path("digen_cookies.json")
+    tracking_file = Path(f"video_tracking_{MODEL}.json")
+    failed_file = Path(f"failed_prompts_{MODEL}.json")
+
+    if tracking_file.exists():
+        with open(tracking_file, 'r') as f:
+            completed_prompts = set(json.load(f))
+    else:
+        completed_prompts = set()
+
+    if failed_file.exists():
+        with open(failed_file, 'r') as f:
+            failed_prompts = json.load(f)
+    else:
+        failed_prompts = {}
+
+    async def close_any_dialogs(page):
+        try:
+            await page.keyboard.press('Escape')
+            await asyncio.sleep(0.5)
+            overlay = page.locator('[data-slot="dialog-overlay"][data-state="open"]')
+            if await overlay.count() > 0:
+                await page.keyboard.press('Escape')
+                await asyncio.sleep(1)
+            await page.wait_for_selector('[data-slot="dialog-overlay"][data-state="open"]', state='hidden', timeout=5000)
+        except:
+            pass
+
+    async def select_grok_model(page):
+        """🎯 Clicca su bottone modello e seleziona 'Grok Video' dal menu popup"""
+        try:
+            if DEBUG_MODE:
+                print(f"   🎯 Seleziono modello Grok...")
+            await close_any_dialogs(page)
+            await asyncio.sleep(2)
+            
+            all_buttons = await page.locator('button:visible').all()
+            
+            model_button = None
+            for btn in all_buttons:
+                try:
+                    text = await btn.text_content()
+                    if not text:
+                        continue
+                    
+                    text_clean = text.strip()
+                    box = await btn.bounding_box()
+                    
+                    if not box:
+                        continue
+                    
+                    if 900 < box['y'] < 1100:
+                        if 3 <= len(text_clean) <= 10 and any(c.isalpha() for c in text_clean):
+                            if text_clean.lower() not in ['auto', 'create']:
+                                if any(c.isdigit() for c in text_clean) or text_clean.isalpha():
+                                    model_button = btn
+                                    if DEBUG_MODE:
+                                        print(f"   ✅ Trovato bottone modello: '{text_clean}' @ pos:({int(box['x'])},{int(box['y'])})")
+                                    break
+                except:
+                    continue
+            
+            if not model_button:
+                return False
+            
+            await model_button.click()
+            await asyncio.sleep(3)
+            
+            candidates = []
+            
+            selectors = [
+                'button:visible',
+                '[role="menuitem"]:visible', 
+                '[role="option"]:visible',
+                'div:visible',
+                'span:visible',
+                'li:visible',
+                'a:visible'
+            ]
+            
+            for selector in selectors:
+                try:
+                    elements = await page.locator(selector).all()
+                    
+                    for elem in elements:
+                        try:
+                            text = await elem.text_content()
+                            if not text:
+                                continue
+                            
+                            text_clean = text.strip()
+                            text_lower = text_clean.lower()
+                            
+                            if 'grok' not in text_lower:
+                                continue
+                            
+                            box = await elem.bounding_box()
+                            if not box:
+                                continue
+                            
+                            if 3 <= len(text_clean) <= 50:
+                                priority = 0
+                                if 'grok video' in text_lower:
+                                    priority = 1
+                                elif text_lower == 'grok':
+                                    priority = 2
+                                else:
+                                    priority = 3
+                                
+                                candidates.append((elem, text_clean, priority, len(text_clean), box['width'] * box['height']))
+                        except:
+                            continue
+                except:
+                    continue
+            
+            if not candidates:
+                await page.keyboard.press('Escape')
+                await asyncio.sleep(0.5)
+                return False
+            
+            candidates.sort(key=lambda c: (c[2], c[3], c[4]))
+            
+            best_elem, best_text, best_priority, best_len, best_area = candidates[0]
+            
+            try:
+                await best_elem.click(timeout=5000)
+                await asyncio.sleep(2)
+                return True
+            except Exception as click_err:
+                try:
+                    clickable_child = best_elem.locator('button, [role="button"], a').first
+                    if await clickable_child.count() > 0:
+                        await clickable_child.click(timeout=5000)
+                        await asyncio.sleep(2)
+                        return True
+                except:
+                    pass
+                
+                await page.keyboard.press('Escape')
+                await asyncio.sleep(0.5)
+                return False
+
+        except Exception as e:
+            return False
+
+    async def set_duration(page, duration):
+        try:
+            await close_any_dialogs(page)
+            await asyncio.sleep(1)
+            
+            all_buttons = await page.locator('button:visible').all()
+            
+            for btn in all_buttons:
+                try:
+                    text = await btn.text_content()
+                    if not text:
+                        continue
+                    
+                    text_clean = text.strip()
+                    box = await btn.bounding_box()
+                    
+                    if not box or not (900 < box['y'] < 1100):
+                        continue
+                    
+                    if 's' in text_clean.lower() and len(text_clean) < 5:
+                        if duration in text_clean:
+                            return True
+                        
+                        await btn.click()
+                        await asyncio.sleep(3)
+                        
+                        all_visible = await page.locator('*:visible').all()
+                        for elem in all_visible:
+                            try:
+                                text = await elem.text_content()
+                                if text and duration == text.strip():
+                                    await elem.click()
+                                    await asyncio.sleep(1)
+                                    return True
+                            except:
+                                continue
+                        
+                        await page.keyboard.press('Escape')
+                        await asyncio.sleep(0.5)
+                        break
+                except:
+                    continue
+            
+            return False
+
+        except Exception as e:
+            return False
+
+    async def set_aspect_ratio(page, ratio):
+        try:
+            await close_any_dialogs(page)
+            await asyncio.sleep(1)
+            
+            all_buttons = await page.locator('button:visible').all()
+            
+            for btn in all_buttons:
+                try:
+                    text = await btn.text_content()
+                    if not text:
+                        continue
+                    
+                    text_clean = text.strip()
+                    box = await btn.bounding_box()
+                    
+                    if not box or not (900 < box['y'] < 1100):
+                        continue
+                    
+                    if ':' in text_clean or 'auto' in text_clean.lower():
+                        if ratio in text_clean:
+                            return True
+                        
+                        await btn.click()
+                        await asyncio.sleep(3)
+                        
+                        all_visible = await page.locator('*:visible').all()
+                        for elem in all_visible:
+                            try:
+                                text = await elem.text_content()
+                                if text and ratio == text.strip():
+                                    await elem.click()
+                                    await asyncio.sleep(1)
+                                    return True
+                            except:
+                                continue
+                        
+                        await page.keyboard.press('Escape')
+                        await asyncio.sleep(0.5)
+                        break
+                except:
+                    continue
+            
+            return False
+
+        except Exception as e:
+            return False
+
+    async def set_resolution(page, resolution):
+        """🎞️ MULTI-STRATEGIA per attivare 1080P"""
+        try:
+            print(f"   🎞️ Imposto risoluzione {resolution}...")
+            await close_any_dialogs(page)
+            await asyncio.sleep(1)
+            
+            # ➡️ TROVA bottone risoluzione principale
+            all_buttons = await page.locator('button:visible').all()
+            res_button = None
+            current_res = "?"
+            
+            for btn in all_buttons:
+                try:
+                    text = await btn.text_content()
+                    if not text:
+                        continue
+                    text_clean = text.strip()
+                    box = await btn.bounding_box()
+                    if not box or not (900 < box['y'] < 1100):
+                        continue
+                    if 'p' in text_clean.lower() and len(text_clean) < 8:
+                        res_button = btn
+                        current_res = text_clean
+                        print(f"   🔍 Bottone: '{current_res}'")
+                        if '1080' in text_clean:
+                            print(f"   ✅ {resolution} già attivo")
+                            return True
+                        break
+                except:
+                    continue
+            
+            if not res_button:
+                print(f"   ⚠️ Bottone non trovato")
+                return True
+            
+            # ➡️ APRI menu
+            print(f"   📂 Apro menu...")
+            await res_button.click(force=True)
+            await asyncio.sleep(2)
+            
+            async def try_click_1080():
+                """🔥 6 STRATEGIE"""
+                
+                # 1️⃣ Radio button
+                try:
+                    radio = page.get_by_role("radio", name="1080P").first
+                    if await radio.count() > 0:
+                        await radio.click(timeout=3000)
+                        print(f"   ✅ [1/6] Radio button")
+                        await asyncio.sleep(1)
+                        return True
+                except:
+                    pass
+                
+                # 2️⃣ Button
+                try:
+                    btn = page.get_by_role("button", name="1080P").first
+                    if await btn.count() > 0:
+                        await btn.click(timeout=3000)
+                        print(f"   ✅ [2/6] Button")
+                        await asyncio.sleep(1)
+                        return True
+                except:
+                    pass
+                
+                # 3️⃣ Menuitem
+                try:
+                    item = page.get_by_role("menuitem", name="1080P").first
+                    if await item.count() > 0:
+                        await item.click(timeout=3000)
+                        print(f"   ✅ [3/6] Menuitem")
+                        await asyncio.sleep(1)
+                        return True
+                except:
+                    pass
+                
+                # 4️⃣ Testo esatto
+                try:
+                    text_elem = page.get_by_text("1080P", exact=True).first
+                    if await text_elem.count() > 0:
+                        await text_elem.click(timeout=3000)
+                        print(f"   ✅ [4/6] Testo")
+                        await asyncio.sleep(1)
+                        return True
+                except:
+                    pass
+                
+                # 5️⃣ FORZA BRUTA - Cerca TUTTI
+                try:
+                    all_visible = await page.locator('*:visible').all()
+                    candidates = []
+                    
+                    for elem in all_visible:
+                        try:
+                            text = await elem.text_content()
+                            if not text or text.strip() != "1080P":
+                                continue
+                            
+                            box = await elem.bounding_box()
+                            if not box or box['y'] < 600:
+                                continue
+                            
+                            candidates.append((elem, box))
+                        except:
+                            continue
+                    
+                    if candidates:
+                        candidates.sort(key=lambda c: c[1]['y'])
+                        best_elem, best_box = candidates[0]
+                        
+                        # Prova click
+                        try:
+                            await best_elem.click(force=True, timeout=3000)
+                            print(f"   ✅ [5/6] Forza bruta")
+                            await asyncio.sleep(1)
+                            return True
+                        except:
+                            pass
+                        
+                        # Prova mouse
+                        try:
+                            await page.mouse.click(
+                                best_box['x'] + best_box['width'] / 2,
+                                best_box['y'] + best_box['height'] / 2
+                            )
+                            print(f"   ✅ [5/6] Mouse click")
+                            await asyncio.sleep(1)
+                            return True
+                        except:
+                            pass
+                except:
+                    pass
+                
+                # 6️⃣ TASTIERA (480P → Down → 720P → Down → 1080P)
+                try:
+                    await page.keyboard.press('ArrowDown')
+                    await asyncio.sleep(0.3)
+                    await page.keyboard.press('ArrowDown')
+                    await asyncio.sleep(0.3)
+                    await page.keyboard.press('Enter')
+                    print(f"   ✅ [6/6] Tastiera")
+                    await asyncio.sleep(1)
+                    return True
+                except:
+                    pass
+                
+                return False
+            
+            # ➡️ PROVA TUTTE LE STRATEGIE
+            success = await try_click_1080()
+            
+            if not success:
+                await page.keyboard.press('Escape')
+                print(f"   ❌ Tutte le strategie fallite")
+                return True
+            
+            # ➡️ VERIFICA
+            await asyncio.sleep(2)
+            all_buttons_check = await page.locator('button:visible').all()
+            
+            for btn in all_buttons_check:
+                try:
+                    text = await btn.text_content()
+                    if not text:
+                        continue
+                    text_clean = text.strip()
+                    box = await btn.bounding_box()
+                    if not box or not (900 < box['y'] < 1100):
+                        continue
+                    if 'p' in text_clean.lower() and len(text_clean) < 8:
+                        if '1080' in text_clean:
+                            print(f"   ✅ {resolution} ATTIVATO!")
+                            return True
+                        else:
+                            print(f"   ⚠️ Ancora {text_clean} (continuo)")
+                            return True
+                except:
+                    continue
+            
+            return True
+
+        except Exception as e:
+            print(f"   ⚠️ Errore: {str(e)[:80]}")
+            return True
+
+    async def configure_generation_settings(page):
+        if DEBUG_MODE:
+            print(f"   ⚙️ Configurazione parametri...")
+        await close_any_dialogs(page)
+        await select_grok_model(page)
+        await set_duration(page, DURATION)
+        await set_aspect_ratio(page, ASPECT_RATIO)
+        await set_resolution(page, RESOLUTION)
+        await close_any_dialogs(page)
+
+    async def insert_prompt_multiline(page, prompt_text):
+        try:
+            await close_any_dialogs(page)
+            await asyncio.sleep(1)
+            textarea = page.locator('textarea[maxlength="5000"]').first
+            await textarea.wait_for(state='visible', timeout=10000)
+            await textarea.click(force=True)
+            await asyncio.sleep(0.5)
+            await page.keyboard.press('Control+A')
+            await page.keyboard.press('Backspace')
+            await asyncio.sleep(0.3)
+            await textarea.fill(prompt_text)
+            await asyncio.sleep(0.5)
+            return True
+        except Exception as e:
+            try:
+                await page.keyboard.press('Escape')
+                await asyncio.sleep(1)
+                textarea = page.locator('textarea').first
+                await textarea.click(force=True, timeout=5000)
+                await asyncio.sleep(0.5)
+                await page.keyboard.type(prompt_text, delay=10)
+                await asyncio.sleep(0.5)
+                return True
+            except:
+                return False
+
+    async def click_generate_button(page):
+        try:
+            await close_any_dialogs(page)
+            generate_selectors = [
+                'button[class*="bg-light"][class*="font-medium"]:has(svg)',
+                'button.bg-light:has(svg)',
+                'button[data-slot="button"]:has(svg)'
+            ]
+            for selector in generate_selectors:
+                try:
+                    btn = page.locator(selector).last
+                    if await btn.count() > 0 and await btn.is_visible():
+                        await asyncio.sleep(2)
+                        is_disabled = await btn.get_attribute('disabled')
+                        if is_disabled is None:
+                            await btn.click()
+                            return True
+                except:
+                    continue
+            await page.keyboard.press('Control+Enter')
+            return True
+        except Exception as e:
+            return False
+
+    async def is_button_enabled(btn):
+        try:
+            is_disabled = await btn.get_attribute('disabled')
+            if is_disabled is not None:
+                return False
+            is_visible = await btn.is_visible()
+            if not is_visible:
+                return False
+            box = await btn.bounding_box()
+            if not box:
+                return False
+            return True
+        except:
+            return False
+
+    async def wait_for_button_enabled(btn, timeout=30):
+        start = asyncio.get_event_loop().time()
+        while (asyncio.get_event_loop().time() - start) < timeout:
+            if await is_button_enabled(btn):
+                return True
+            await asyncio.sleep(1)
+        return False
+
+    async def count_download_buttons(page, show_details=False):
+        """🔢 Conta bottoni download"""
+        try:
+            await asyncio.sleep(2)
+            download_buttons = []
+            
+            all_buttons = await page.locator('button:visible').all()
+            
+            for btn in all_buttons:
+                try:
+                    is_visible = await btn.is_visible()
+                    if not is_visible:
+                        continue
+                    
+                    box = await btn.bounding_box()
+                    if not box:
+                        continue
+                    
+                    if not (15 < box['width'] < 100 and 15 < box['height'] < 100):
+                        continue
+                    
+                    html = await btn.inner_html()
+                    if 'M228,144v64a12,12,0,0,1-12,12H40' in html or 'download' in html.lower():
+                        download_buttons.append((btn, box['x'], box['y']))
+                        if show_details and DEBUG_MODE:
+                            print(f"      ✓ Download @ ({int(box['x'])}, {int(box['y'])})")
+                except:
+                    continue
+            
+            download_buttons.sort(key=lambda b: (b[2], b[1]))
+            
+            return download_buttons
+        except Exception as e:
+            return []
+
+    async def find_download_buttons_new_interface(page, check_enabled=True):
+        try:
+            buttons = await count_download_buttons(page, show_details=False)
+            if check_enabled:
+                enabled = []
+                for btn, x, y in buttons:
+                    if await is_button_enabled(btn):
+                        enabled.append((btn, x, y))
+                return enabled
+            return buttons
+        except:
+            return []
+
+    async def wait_for_new_videos(page, initial_count, expected_new, timeout=MAX_GENERATION_WAIT):
+        """🎯 Aspetta NUOVI video"""
+        print(f"\n⏳ Attendo {expected_new} nuovi video (da {initial_count} a {initial_count + expected_new})...")
+        
+        start = asyncio.get_event_loop().time()
+        max_seen = initial_count
+        last_print_time = 0
+        
+        while (asyncio.get_event_loop().time() - start) < timeout:
+            await asyncio.sleep(10)
+            
+            current_buttons = await count_download_buttons(page, show_details=False)
+            current_count = len(current_buttons)
+            
+            if current_count > max_seen:
+                max_seen = current_count
+                new_count = current_count - initial_count
+                print(f"   📊 Rilevati: {current_count} (+{new_count} nuovi)")
+            
+            elapsed = int(asyncio.get_event_loop().time() - start)
+            
+            if current_count >= (initial_count + expected_new):
+                new_videos = current_count - initial_count
+                print(f"   ✅ {new_videos} nuovi video pronti!\n")
+                return True, current_buttons
+            
+            if elapsed - last_print_time >= 30:
+                print(f"   ⏳ {elapsed}s... {current_count}/{initial_count + expected_new}")
+                last_print_time = elapsed
+        
+        print(f"   ⚠️ Timeout! Max visti: {max_seen}\n")
+        final_buttons = await count_download_buttons(page, show_details=False)
+        return False, final_buttons
+
+    async def download_from_position(page, file_name, download_folder, position):
+        """🎯 Download da posizione"""
+        max_retries = MAX_DOWNLOAD_RETRIES
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    print(f"      🔄 Retry {attempt + 1}/{max_retries}...")
+                    await asyncio.sleep(10)
+                
+                download_buttons = await find_download_buttons_new_interface(page, check_enabled=True)
+                if not download_buttons:
+                    if attempt < max_retries - 1:
+                        continue
+                    return False, "No buttons", None
+                
+                if position >= len(download_buttons):
+                    if attempt < max_retries - 1:
+                        continue
+                    return False, f"Pos {position} invalid", None
+                
+                download_btn, x, y = download_buttons[position]
+                
+                if not await wait_for_button_enabled(download_btn, timeout=30):
+                    if attempt < max_retries - 1:
+                        continue
+                    return False, "Not clickable", None
+                
+                async with page.expect_download(timeout=90000) as dl_info:
+                    await download_btn.click()
+                download = await dl_info.value
+                ext = Path(download.suggested_filename).suffix or '.mp4'
+                final_path = download_folder / f"{file_name}{ext}"
+                await download.save_as(str(final_path))
+                size = final_path.stat().st_size
+                if size < 10000:
+                    final_path.unlink()
+                    if attempt < max_retries - 1:
+                        continue
+                    return False, "Corrupt", None
+                size_mb = size / (1024 * 1024)
+                return True, f"{size_mb:.1f} MB", final_path
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    continue
+                return False, str(e)[:40], None
+        return False, "Failed", None
+
+    def check_video_exists(file_name, download_folder):
+        for ext in ['.mp4', '.webm', '.mov']:
+            path = download_folder / f"{file_name}{ext}"
+            if path.exists():
+                size_mb = path.stat().st_size / (1024 * 1024)
+                return True, path, size_mb
+        return False, None, 0
+
+    def save_tracking(completed, failed):
+        with open(tracking_file, 'w') as f:
+            json.dump(list(completed), f)
+        with open(failed_file, 'w') as f:
+            json.dump(failed, f, indent=2)
+
+    print("🌐 Avvio browser...")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage']
+        )
+        context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            accept_downloads=True,
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        )
+        page = await context.new_page()
+        page.on("dialog", lambda dialog: dialog.accept())
+
+        try:
+            if not cookies_file.exists():
+                print("❌ Cookies non trovati")
+                return
+
+            print("📥 Carico sessione...")
+            with open(cookies_file, 'r') as f:
+                cookies = json.load(f)
+            await context.add_cookies(cookies)
+
+            print(f"🌐 Navigo a DiGen.ai...")
+            await page.goto(BASE_URL, timeout=30000)
+            await asyncio.sleep(3)
+
+            await configure_generation_settings(page)
+            print("✅ Sessione attiva!\n")
+
+            print(f"🎬 INIZIO GENERAZIONE - Batch da {BATCH_SIZE}")
+            print(f"⏱️ Pausa: {PAUSE_BETWEEN_PROMPTS}s | Retry: {MAX_DOWNLOAD_RETRIES} | Timeout: {MAX_GENERATION_WAIT//60}min")
+            print("="*60 + "\n")
+
+            batch_num = 0
+            for i in range(0, total_prompts, BATCH_SIZE):
+                batch_num += 1
+                batch = df.iloc[i:i+BATCH_SIZE]
+
+                to_generate = []
+                for idx, row in batch.iterrows():
+                    file_name = str(row['NomeFile']).strip()
+
+                    if file_name in completed_prompts:
+                        continue
+
+                    exists, path, size = check_video_exists(file_name, download_folder)
+                    if exists:
+                        print(f"   ⏭️ Skip {file_name} ({size:.1f} MB)")
+                        completed_prompts.add(file_name)
+                        save_tracking(completed_prompts, failed_prompts)
+                        continue
+
+                    to_generate.append((idx, row))
+
+                if not to_generate:
+                    print(f"📦 BATCH {batch_num}: Completato\n")
+                    continue
+
+                print(f"📦 BATCH {batch_num}/{(total_prompts + BATCH_SIZE - 1) // BATCH_SIZE} - {len(to_generate)} video")
+
+                await page.goto(BASE_URL, timeout=30000)
+                await asyncio.sleep(2)
+                await configure_generation_settings(page)
+                await asyncio.sleep(2)
+
+                initial_buttons = await count_download_buttons(page, show_details=False)
+                initial_count = len(initial_buttons)
+                print(f"   📊 Video presenti: {initial_count}")
+
+                generation_success = {}
+                for gen_idx, (idx, row) in enumerate(to_generate):
+                    prompt_text = str(row['Prompt']).strip()
+                    file_name = str(row['NomeFile']).strip()
+
+                    print(f"   📝 {gen_idx + 1}/{len(to_generate)}: {file_name}...", end=" ")
+
+                    if not await insert_prompt_multiline(page, prompt_text):
+                        print("❌")
+                        generation_success[file_name] = False
+                        continue
+                    
+                    if await click_generate_button(page):
+                        print("✅")
+                        generation_success[file_name] = True
+                    else:
+                        print("❌")
+                        generation_success[file_name] = False
+
+                    if gen_idx < len(to_generate) - 1:
+                        await asyncio.sleep(PAUSE_BETWEEN_PROMPTS)
+
+                expected_videos = sum(1 for success in generation_success.values() if success)
+
+                if expected_videos == 0:
+                    print(f"   ⚠️ Nessun video generato\n")
+                    continue
+
+                success_wait, all_buttons = await wait_for_new_videos(page, initial_count, expected_videos)
+
+                await asyncio.sleep(5)
+
+                final_buttons = await count_download_buttons(page, show_details=False)
+                final_count = len(final_buttons)
+                print(f"   📊 Video totali: {final_count} (+{final_count - initial_count})\n")
+
+                successful_downloads = 0
+                for download_idx in range(len(to_generate)):
+                    idx, row = to_generate[download_idx]
+                    file_name = str(row['NomeFile']).strip()
+
+                    if not generation_success.get(file_name, False):
+                        print(f"   {download_idx + 1}/{len(to_generate)}: {file_name} - ⏭️ Skip")
+                        failed_prompts[file_name] = failed_prompts.get(file_name, 0) + 1
+                        continue
+
+                    # 🔥 FIX: Inverti l'ordine perché i video nuovi appaiono in alto
+                    absolute_position = len(to_generate) - 1 - download_idx
+
+                    print(f"   {download_idx + 1}/{len(to_generate)}: {file_name}...", end=" ")
+                    success_dl, msg, path = await download_from_position(
+                        page, file_name, download_folder, absolute_position
+                    )
+
+                    if success_dl:
+                        print(f"✅ {msg}")
+                        completed_prompts.add(file_name)
+                        failed_prompts.pop(file_name, None)
+                        successful_downloads += 1
+                    else:
+                        print(f"❌ {msg}")
+                        failed_prompts[file_name] = failed_prompts.get(file_name, 0) + 1
+
+                    save_tracking(completed_prompts, failed_prompts)
+                    await asyncio.sleep(3)
+
+                print(f"\n✅ BATCH {batch_num} OK ({successful_downloads}/{len(to_generate)})\n")
+
+                if i + BATCH_SIZE < total_prompts:
+                    await asyncio.sleep(15)
+
+            print("\n" + "="*60)
+            print("🎉 COMPLETATO!")
+            print("="*60)
+
+            videos = list(download_folder.glob("*.mp4")) + list(download_folder.glob("*.webm"))
+            total_mb = sum(v.stat().st_size for v in videos) / (1024 * 1024)
+
+            print(f"\n📊 STATISTICHE:")
+            print(f"   ✅ Video: {len(videos)}/{total_prompts}")
+            print(f"   💾 Spazio: {total_mb:.1f} MB")
+
+            if failed_prompts:
+                print(f"\n⚠️ FALLITI: {len(failed_prompts)}")
+                for name, count in failed_prompts.items():
+                    print(f"   - {name} ({count}x)")
+
+            print(f"\n📁 {download_folder}\n")
+
+        except Exception as e:
+            print(f"\n❌ ERRORE: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            await browser.close()
+
+await automate_digen_grok_batch()

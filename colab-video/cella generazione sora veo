@@ -1,0 +1,570 @@
+# ============================================
+# CELLA 4: FIX FINALE - Monitora Cambiamenti Posizioni
+# ============================================
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+import pandas as pd
+from playwright.async_api import async_playwright
+import asyncio
+import json
+from pathlib import Path
+from collections import defaultdict
+
+MODEL = "veo"
+BATCH_SIZE = 2
+PAUSE_BETWEEN_PROMPTS = 20
+MAX_DOWNLOAD_RETRIES = 2
+MAX_GENERATION_WAIT = 500  # 7 minuti per generazioni lente
+DOWNLOAD_FOLDER_NAME = "video_generati"
+
+async def automate_digen_batch():
+    if MODEL not in ["veo", "sora2"]:
+        print("❌ MODEL deve essere 'veo' o 'sora2'")
+        return
+
+    BASE_URL = "https://digen.ai/"
+    print(f"🎬 Modalità selezionata: {MODEL.upper()}\n")
+
+    print("📂 Lettura file Excel...")
+    df = pd.read_excel('prompts.xlsx')
+    total_prompts = len(df)
+    print(f"✅ Trovati {total_prompts} prompt\n")
+
+    download_folder = Path(f"/content/drive/MyDrive/{DOWNLOAD_FOLDER_NAME}")
+    download_folder.mkdir(exist_ok=True, parents=True)
+    print(f"📁 Cartella download: {download_folder}\n")
+
+    cookies_file = Path("digen_cookies.json")
+    tracking_file = Path(f"video_tracking_{MODEL}.json")
+    failed_file = Path(f"failed_prompts_{MODEL}.json")
+
+    if tracking_file.exists():
+        with open(tracking_file, 'r') as f:
+            completed_prompts = set(json.load(f))
+    else:
+        completed_prompts = set()
+
+    if failed_file.exists():
+        with open(failed_file, 'r') as f:
+            failed_prompts = json.load(f)
+    else:
+        failed_prompts = {}
+
+    # ============================================
+    # FUNZIONI HELPER
+    # ============================================
+
+    async def select_model(page, model):
+        try:
+            print(f"   🎯 Seleziono modello {model.upper()}...")
+
+            if model == "sora2":
+                selectors = [
+                    'a[href*="sora"]',
+                    'button:has-text("Sora")',
+                    'a:has-text("Sora2")',
+                    '[data-model="sora"]',
+                    'nav a[href="/sora"]'
+                ]
+
+                for selector in selectors:
+                    try:
+                        element = page.locator(selector).first
+                        if await element.count() > 0:
+                            await element.click()
+                            await asyncio.sleep(2)
+                            print(f"   ✅ Tab SORA2 selezionato")
+
+                            current_url = page.url
+                            if 'sora' in current_url.lower():
+                                if 'seconds=' not in current_url:
+                                    await page.goto(f"{current_url}?seconds=15&orientation=landscape", timeout=30000)
+                                    await asyncio.sleep(2)
+                                return True
+                    except:
+                        continue
+
+                print(f"   ⚠️ Tab non trovato, navigo direttamente...")
+                await page.goto("https://digen.ai/sora?seconds=15&orientation=landscape", timeout=30000)
+                await asyncio.sleep(3)
+                return True
+
+            elif model == "veo":
+                selectors = [
+                    'a[href*="veo"]',
+                    'button:has-text("VEO")',
+                    'a:has-text("VEO")',
+                    '[data-model="veo"]',
+                    'nav a[href="/veo"]'
+                ]
+
+                for selector in selectors:
+                    try:
+                        element = page.locator(selector).first
+                        if await element.count() > 0:
+                            await element.click()
+                            await asyncio.sleep(2)
+                            print(f"   ✅ Tab VEO selezionato")
+
+                            current_url = page.url
+                            if 'veo' in current_url.lower():
+                                if 'orientation=' not in current_url:
+                                    await page.goto(f"{current_url}?orientation=landscape", timeout=30000)
+                                    await asyncio.sleep(2)
+                                return True
+                    except:
+                        continue
+
+                print(f"   ⚠️ Tab non trovato, navigo direttamente...")
+                await page.goto("https://digen.ai/veo?orientation=landscape", timeout=30000)
+                await asyncio.sleep(3)
+                return True
+
+            return False
+
+        except Exception as e:
+            print(f"   ⚠️ Errore selezione modello: {e}")
+            return False
+
+    async def verify_model_selected(page, model):
+        try:
+            current_url = page.url.lower()
+
+            if model == "sora2" and "sora" in current_url:
+                print(f"   ✅ Modello SORA2 confermato (URL: {page.url})")
+                return True
+            elif model == "veo" and "veo" in current_url:
+                print(f"   ✅ Modello VEO confermato (URL: {page.url})")
+                return True
+            else:
+                print(f"   ⚠️ Modello non confermato! URL: {page.url}")
+                return False
+        except:
+            return False
+
+    async def insert_prompt_multiline(page, prompt_text):
+        try:
+            textarea = page.locator('textarea').first
+            await textarea.click()
+            await asyncio.sleep(0.3)
+            await page.keyboard.press('Control+A')
+            await page.keyboard.press('Backspace')
+            await asyncio.sleep(0.3)
+            await textarea.fill(prompt_text)
+            await asyncio.sleep(0.5)
+            return True
+        except Exception as e:
+            print(f"      ⚠️ Errore inserimento: {e}")
+            return False
+
+    async def is_button_enabled(btn):
+        try:
+            is_disabled = await btn.get_attribute('disabled')
+            if is_disabled is not None:
+                return False
+
+            is_visible = await btn.is_visible()
+            if not is_visible:
+                return False
+
+            box = await btn.bounding_box()
+            if not box:
+                return False
+
+            return True
+        except:
+            return False
+
+    async def wait_for_button_enabled(btn, timeout=30):
+        start = asyncio.get_event_loop().time()
+
+        while (asyncio.get_event_loop().time() - start) < timeout:
+            if await is_button_enabled(btn):
+                return True
+            await asyncio.sleep(1)
+
+        return False
+
+    async def find_download_buttons_in_sidebar(page, check_enabled=True):
+        try:
+            await asyncio.sleep(2)
+            all_buttons = await page.locator('button:visible').all()
+            sidebar_buttons = []
+
+            for btn in all_buttons:
+                try:
+                    is_visible = await btn.is_visible()
+                    if not is_visible:
+                        continue
+
+                    box = await btn.bounding_box()
+                    if not box:
+                        continue
+
+                    if box['x'] < 1500:
+                        continue
+
+                    if check_enabled:
+                        if not await is_button_enabled(btn):
+                            continue
+
+                    html = await btn.inner_html()
+                    has_svg = 'svg' in html.lower()
+                    is_icon_button = (box['width'] < 100 and box['height'] < 100)
+
+                    if has_svg and is_icon_button:
+                        sidebar_buttons.append((btn, box['x'], box['y']))
+
+                except Exception as e:
+                    continue
+
+            by_y = defaultdict(list)
+            for btn, x, y in sidebar_buttons:
+                y_group = round(y / 30) * 30
+                by_y[y_group].append((btn, x, y))
+
+            download_buttons = []
+            for y_group in sorted(by_y.keys()):
+                buttons = by_y[y_group]
+                buttons.sort(key=lambda b: b[1])
+                rightmost = buttons[-1]
+                download_buttons.append(rightmost)
+
+            return download_buttons
+
+        except Exception as e:
+            print(f"      ⚠️ Errore ricerca bottoni: {e}")
+            return []
+
+    # 🆕 Monitora CAMBIAMENTI nelle posizioni Y (nuovi video sostituiscono vecchi)
+    async def wait_for_videos_ready(page, initial_clickable, expected_new, timeout=MAX_GENERATION_WAIT):
+        print(f"   📊 Bottoni clickable iniziali: {initial_clickable}")
+        print(f"   🎯 Nuovi video attesi: {expected_new}")
+        print(f"   ⏰ Timeout massimo: {timeout}s (~{timeout//60} min)\n")
+
+        # 🆕 Ottieni snapshot posizioni iniziali
+        initial_buttons = await find_download_buttons_in_sidebar(page, check_enabled=True)
+        initial_positions = set((int(y//50)*50) for _, x, y in initial_buttons)  # Y arrotondate a 50px
+
+        print(f"   📍 Posizioni Y iniziali: {sorted(initial_positions)}")
+
+        start = asyncio.get_event_loop().time()
+        changes_detected = 0
+        last_positions = initial_positions
+
+        while (asyncio.get_event_loop().time() - start) < timeout:
+            await asyncio.sleep(10)
+
+            current_buttons = await find_download_buttons_in_sidebar(page, check_enabled=True)
+            current_positions = set((int(y//50)*50) for _, x, y in current_buttons)
+            current_clickable = len(current_buttons)
+
+            elapsed = int(asyncio.get_event_loop().time() - start)
+
+            # 🆕 Rileva CAMBIAMENTI nelle posizioni
+            if current_positions != last_positions:
+                changes_detected += 1
+                print(f"      🔄 {elapsed}s: Posizioni cambiate! (cambio #{changes_detected})")
+                print(f"      📍 Nuove posizioni Y: {sorted(current_positions)}")
+
+                # Se ha rilevato abbastanza cambiamenti = video pronti
+                if changes_detected >= expected_new:
+                    print(f"\n   ✅ Rilevati {changes_detected} cambiamenti = {expected_new} video pronti!")
+                    return True
+
+                # Aggiorna snapshot
+                last_positions = current_positions
+
+            # Log ogni 30s
+            if elapsed % 30 == 0 and elapsed > 0:
+                print(f"      ⏳ {elapsed}s... clickable: {current_clickable}, cambiamenti: {changes_detected}/{expected_new}")
+
+            # ✅ Dopo 90s con cambiamenti rilevati = probabilmente pronti
+            if elapsed > 90 and changes_detected >= expected_new:
+                print(f"\n   ✅ {changes_detected} cambiamenti dopo {elapsed}s, procedo!")
+                return True
+
+        # Timeout
+        print(f"\n   ⚠️ Timeout {timeout}s! Cambiamenti: {changes_detected}/{expected_new}")
+
+        if changes_detected > 0:
+            print(f"   ✅ Rilevati {changes_detected} cambiamenti, video probabilmente pronti!")
+            return True
+        else:
+            print(f"   ⚠️ Nessun cambiamento rilevato, procedo con retry...")
+            return False
+
+    async def download_from_sidebar_position(page, file_name, download_folder, position):
+        max_retries = MAX_DOWNLOAD_RETRIES
+
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    print(f"      🔄 Tentativo {attempt + 1}/{max_retries}...")
+                    await asyncio.sleep(10)
+
+                print(f"      🔍 Cerco bottoni download...")
+                download_buttons = await find_download_buttons_in_sidebar(page, check_enabled=True)
+
+                if not download_buttons:
+                    if attempt < max_retries - 1:
+                        print(f"      ⚠️ Nessun bottone clickable, attendo...")
+                        continue
+                    return False, "Nessun bottone trovato dopo retry", None
+
+                print(f"      ✅ Trovati {len(download_buttons)} bottoni clickable")
+
+                if position >= len(download_buttons):
+                    if attempt < max_retries - 1:
+                        print(f"      ⚠️ Posizione {position} non esiste, attendo...")
+                        continue
+                    return False, f"Posizione {position} non esiste (solo {len(download_buttons)} bottoni)", None
+
+                download_btn, x, y = download_buttons[position]
+                print(f"      🎯 Bottone posizione {position} a ({int(x)}, {int(y)})")
+
+                print(f"      ⏳ Verifico che il bottone sia clickable...")
+                if not await wait_for_button_enabled(download_btn, timeout=30):
+                    if attempt < max_retries - 1:
+                        print(f"      ⚠️ Bottone non clickable, riprovo...")
+                        continue
+                    return False, "Bottone non clickable dopo 30s", None
+
+                print(f"      📥 Clicco download...")
+                async with page.expect_download(timeout=90000) as dl_info:
+                    await download_btn.click()
+                download = await dl_info.value
+
+                ext = Path(download.suggested_filename).suffix or '.mp4'
+                final_path = download_folder / f"{file_name}{ext}"
+
+                print(f"      💾 Salvo in Drive...")
+                await download.save_as(str(final_path))
+
+                size = final_path.stat().st_size
+                if size < 10000:
+                    final_path.unlink()
+                    if attempt < max_retries - 1:
+                        print(f"      ⚠️ File corrotto, riprovo...")
+                        continue
+                    return False, "File corrotto", None
+
+                size_mb = size / (1024 * 1024)
+                return True, f"{size_mb:.1f} MB", final_path
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"      ⚠️ Errore: {str(e)[:50]}, riprovo...")
+                    continue
+                return False, f"Errore: {str(e)[:100]}", None
+
+        return False, "Tutti i tentativi falliti", None
+
+    def check_video_exists(file_name, download_folder):
+        for ext in ['.mp4', '.webm', '.mov']:
+            path = download_folder / f"{file_name}{ext}"
+            if path.exists():
+                size_mb = path.stat().st_size / (1024 * 1024)
+                return True, path, size_mb
+        return False, None, 0
+
+    def save_tracking(completed, failed):
+        with open(tracking_file, 'w') as f:
+            json.dump(list(completed), f)
+        with open(failed_file, 'w') as f:
+            json.dump(failed, f, indent=2)
+
+    # ============================================
+    # MAIN EXECUTION
+    # ============================================
+
+    print("🌐 Avvio browser...")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage']
+        )
+        context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            accept_downloads=True,
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        )
+        page = await context.new_page()
+        page.on("dialog", lambda dialog: dialog.accept())
+
+        try:
+            if not cookies_file.exists():
+                print("❌ File cookies non trovato! Esegui prima la CELLA 3")
+                return
+
+            print("📥 Carico sessione...")
+            with open(cookies_file, 'r') as f:
+                cookies = json.load(f)
+            await context.add_cookies(cookies)
+
+            print(f"🌐 Navigo a DiGen.ai...")
+            await page.goto(BASE_URL, timeout=30000)
+            await asyncio.sleep(3)
+
+            if not await select_model(page, MODEL):
+                print("❌ Errore nella selezione del modello!")
+                return
+
+            if not await verify_model_selected(page, MODEL):
+                print("❌ Modello non confermato, esco...")
+                return
+
+            print("✅ Sessione valida e modello selezionato!\n")
+
+            print(f"🎬 INIZIO GENERAZIONE ({MODEL.upper()}) - Batch da {BATCH_SIZE}")
+            print(f"⏱️ Pausa tra prompt: {PAUSE_BETWEEN_PROMPTS}s")
+            print(f"🔄 Retry download: {MAX_DOWNLOAD_RETRIES} tentativi")
+            print(f"⏰ Timeout generazione: {MAX_GENERATION_WAIT}s (~{MAX_GENERATION_WAIT//60} min)")
+            print("="*60 + "\n")
+
+            batch_num = 0
+            for i in range(0, total_prompts, BATCH_SIZE):
+                batch_num += 1
+                batch = df.iloc[i:i+BATCH_SIZE]
+
+                to_generate = []
+                for idx, row in batch.iterrows():
+                    file_name = str(row['NomeFile']).strip()
+
+                    if file_name in completed_prompts:
+                        continue
+
+                    exists, path, size = check_video_exists(file_name, download_folder)
+                    if exists:
+                        print(f"   ⏭️ Skip {file_name}: già presente ({size:.1f} MB)")
+                        completed_prompts.add(file_name)
+                        save_tracking(completed_prompts, failed_prompts)
+                        continue
+
+                    to_generate.append((idx, row))
+
+                if not to_generate:
+                    print(f"📦 BATCH {batch_num}: Tutti già completati, skip\n")
+                    continue
+
+                print(f"📦 BATCH {batch_num}/{(total_prompts + BATCH_SIZE - 1) // BATCH_SIZE}")
+                print(f"   Video da generare: {len(to_generate)}")
+
+                print(f"   🔄 Ricarico pagina...")
+                await page.goto(BASE_URL, timeout=30000)
+                await asyncio.sleep(2)
+                await select_model(page, MODEL)
+                await asyncio.sleep(2)
+
+                # Conta bottoni clickable iniziali
+                initial_buttons = await find_download_buttons_in_sidebar(page, check_enabled=True)
+                initial_clickable = len(initial_buttons)
+
+                generation_success = {}
+                for gen_idx, (idx, row) in enumerate(to_generate):
+                    prompt_text = str(row['Prompt']).strip()
+                    file_name = str(row['NomeFile']).strip()
+
+                    print(f"\n   📝 {gen_idx + 1}/{len(to_generate)}: {file_name}")
+
+                    if not await insert_prompt_multiline(page, prompt_text):
+                        print(f"   ⚠️ Errore inserimento, salto")
+                        generation_success[file_name] = False
+                        continue
+
+                    print(f"   ✅ Inserito")
+                    print(f"   🚀 Generate...")
+                    await page.keyboard.press('Control+Enter')
+                    print(f"   ✅ Inviato")
+                    generation_success[file_name] = True
+
+                    if gen_idx < len(to_generate) - 1:
+                        print(f"   ⏸️ Pausa {PAUSE_BETWEEN_PROMPTS}s...")
+                        await asyncio.sleep(PAUSE_BETWEEN_PROMPTS)
+
+                expected_videos = sum(1 for success in generation_success.values() if success)
+
+                if expected_videos == 0:
+                    print(f"\n⚠️ Nessun video da generare in questo batch\n")
+                    continue
+
+                # 🆕 Attendi rilevando CAMBIAMENTI nelle posizioni
+                print(f"\n⏳ Attendo che {expected_videos} video diventino pronti...")
+                await wait_for_videos_ready(page, initial_clickable, expected_videos)
+
+                await asyncio.sleep(5)
+
+                print(f"\n📥 Scarico {len(to_generate)} video...\n")
+
+                successful_downloads = 0
+                for download_idx in range(len(to_generate)):
+                    idx, row = to_generate[download_idx]
+                    file_name = str(row['NomeFile']).strip()
+
+                    if not generation_success.get(file_name, False):
+                        print(f"   ⏭️ {download_idx + 1}/{len(to_generate)}: {file_name} - Non generato, skip")
+                        failed_prompts[file_name] = failed_prompts.get(file_name, 0) + 1
+                        continue
+
+                    position = len(to_generate) - 1 - download_idx
+
+                    print(f"   {download_idx + 1}/{len(to_generate)}: {file_name} (pos: {position})")
+                    success, msg, path = await download_from_sidebar_position(
+                        page, file_name, download_folder, position
+                    )
+
+                    if success:
+                        print(f"      ✅ {msg}\n")
+                        completed_prompts.add(file_name)
+                        failed_prompts.pop(file_name, None)
+                        successful_downloads += 1
+                    else:
+                        print(f"      ❌ {msg}\n")
+                        failed_prompts[file_name] = failed_prompts.get(file_name, 0) + 1
+
+                    save_tracking(completed_prompts, failed_prompts)
+                    await asyncio.sleep(3)
+
+                print(f"✅ BATCH {batch_num} COMPLETATO! ({successful_downloads}/{len(to_generate)} scaricati)\n")
+
+                if i + BATCH_SIZE < total_prompts:
+                    print("⏸️ Pausa 15s prima del prossimo batch...")
+                    await asyncio.sleep(15)
+
+            print("\n" + "="*60)
+            print("🎉 GENERAZIONE COMPLETATA!")
+            print("="*60)
+
+            videos = list(download_folder.glob("*.mp4")) + list(download_folder.glob("*.webm"))
+            total_mb = sum(v.stat().st_size for v in videos) / (1024 * 1024)
+
+            print(f"\n📊 STATISTICHE FINALI:")
+            print(f"   ✅ Video scaricati: {len(videos)}/{total_prompts}")
+            print(f"   💾 Spazio totale: {total_mb:.1f} MB")
+            print(f"   ⚡ Batch processati: {batch_num}")
+            print(f"   🎬 Modello usato: {MODEL.upper()}")
+
+            if failed_prompts:
+                print(f"\n⚠️ VIDEO FALLITI: {len(failed_prompts)}")
+                print("📝 Lista (salvata in failed_prompts.json):")
+                for name, count in list(failed_prompts.items())[:10]:
+                    print(f"   - {name}: {count} tentativi")
+                if len(failed_prompts) > 10:
+                    print(f"   ... e altri {len(failed_prompts) - 10}")
+                print(f"\n💡 TIP: Riesegui lo script per riprovare i falliti")
+
+            print(f"\n📁 Cartella: {download_folder}")
+            print(f"📄 Tracking: {tracking_file}")
+            print(f"❌ Fallimenti: {failed_file}\n")
+
+        except Exception as e:
+            print(f"\n❌ ERRORE CRITICO: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            await browser.close()
+
+# ESEGUI
+await automate_digen_batch()
