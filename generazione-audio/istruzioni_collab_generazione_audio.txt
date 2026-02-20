@@ -1,0 +1,261 @@
+
+XTTS v2 audio clonazione
+celle:
+
+............
+
+import os
+
+# Fork compatibile con Python 3.12
+!pip install -q coqui-tts
+!pip install -q pydub pyloudnorm noisereduce soundfile
+
+print("✅ Installazione completata. Riavvio runtime...")
+os.kill(os.getpid(), 9)
+
+
+
+...................
+
+import torch
+from TTS.api import TTS
+import os
+
+print(f"✅ TTS importato correttamente")
+print(f"🖥️ Python: {__import__('sys').version[:6]}")
+print(f"🎮 CUDA disponibile: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"   GPU: {torch.cuda.get_device_name(0)}")
+
+
+..............
+
+os.environ["COQUI_TOS_AGREED"] = "1"
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"📦 Caricamento modello su {device} (2-3 minuti)...")
+
+tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+print("✅ Modello pronto!")
+
+
+........
+
+
+import os, time, hashlib, tempfile, re
+import gradio as gr
+import torch
+import numpy as np
+import soundfile as sf
+from TTS.utils.audio.numpy_transforms import save_wav
+from pydub import AudioSegment
+from pydub.silence import detect_leading_silence
+import pyloudnorm as pyln
+import noisereduce as nr
+
+model       = tts.synthesizer.tts_model
+SAMPLE_RATE = 24000
+SPEED_MIN   = 0.7
+SPEED_MAX   = 1.3
+_latent_cache = {}
+
+# ══════════════════════════════════════════════
+# 1. PREPROCESSING TESTO
+# ══════════════════════════════════════════════
+def preprocessa_testo(testo):
+    testo = testo.replace('"','').replace('"','')
+    testo = testo.replace('«','').replace('»','')
+    testo = testo.replace('\u2018',"'").replace('\u2019',"'")
+    testo = re.sub(r'\.(\s+|$)', r',\1', testo)
+    testo = testo.replace('…', ',')
+    testo = re.sub(r'\.{2,}', ',', testo)
+    testo = testo.replace('—', ',').replace('–', ',')
+    testo = re.sub(r'[()[\]{}]', '', testo)
+    testo = re.sub(r'\s+', ' ', testo).strip()
+    return testo
+
+# ══════════════════════════════════════════════
+# 2. PREPARAZIONE REFERENCE AUDIO
+# ══════════════════════════════════════════════
+def trim_silence(audio, threshold=-40, padding_ms=100):
+    start = detect_leading_silence(audio, silence_threshold=threshold)
+    end   = detect_leading_silence(audio.reverse(), silence_threshold=threshold)
+    trimmed = audio[start : len(audio) - end]
+    pad = AudioSegment.silent(duration=padding_ms)
+    return pad + trimmed + pad
+
+def prepara_reference(filepath, denoise=False):
+    audio = AudioSegment.from_file(filepath)
+    audio = audio.set_channels(1).set_frame_rate(22050)
+    audio = trim_silence(audio)
+
+    # File lungo → estrai chunk da 20s con RMS massimo (il più parlato)
+    TARGET_MS = 20_000
+    if len(audio) > TARGET_MS:
+        chunks = [audio[i:i+TARGET_MS] for i in range(0, len(audio) - TARGET_MS, 2000)]
+        audio  = max(chunks, key=lambda c: c.rms)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    audio.export(tmp.name, format="wav")
+
+    if denoise:
+        data, sr = sf.read(tmp.name)
+        data = nr.reduce_noise(y=data, sr=sr, prop_decrease=0.75)
+        sf.write(tmp.name, data, sr)
+
+    return tmp.name
+
+# ══════════════════════════════════════════════
+# 3. POST-PROCESSING OUTPUT
+# ══════════════════════════════════════════════
+def postprocessa_output(wav_path, target_lufs=-18.0):
+    audio = AudioSegment.from_wav(wav_path)
+    audio = trim_silence(audio, threshold=-50, padding_ms=120)
+    audio.export(wav_path, format="wav")
+
+    data, rate = sf.read(wav_path)
+    meter    = pyln.Meter(rate)
+    loudness = meter.integrated_loudness(data)
+    if loudness > -70:
+        data = pyln.normalize.loudness(data, loudness, target_lufs)
+        sf.write(wav_path, data, rate)
+    return wav_path
+
+# ══════════════════════════════════════════════
+# 4. UTILITY
+# ══════════════════════════════════════════════
+def durata_wav(path):
+    data, rate = sf.read(path)
+    return len(data) / rate
+
+def _hash_file(path):
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+# ══════════════════════════════════════════════
+# 5. PRESET
+# ══════════════════════════════════════════════
+PRESET = {
+    "🎯 Stabile (consigliato)": dict(temperature=0.65, top_p=0.80, top_k=50,  repetition_penalty=2.0, length_penalty=1.0, speed=1.00),
+    "🎭 Espressivo":            dict(temperature=0.85, top_p=0.90, top_k=70,  repetition_penalty=2.5, length_penalty=1.0, speed=1.00),
+    "📖 Testo lungo":           dict(temperature=0.60, top_p=0.75, top_k=40,  repetition_penalty=3.0, length_penalty=1.0, speed=1.00),
+    "⚡ Veloce":                dict(temperature=0.70, top_p=0.85, top_k=60,  repetition_penalty=2.0, length_penalty=1.0, speed=1.15),
+}
+
+def applica_preset(nome):
+    p = PRESET[nome]
+    return p["temperature"], p["top_p"], p["top_k"], p["repetition_penalty"], p["length_penalty"], p["speed"]
+
+# ══════════════════════════════════════════════
+# 6. FUNZIONE PRINCIPALE
+# ══════════════════════════════════════════════
+def genera_xtts(
+    testo, ref_file, language,
+    use_cache, denoise_ref, do_postprocess,
+    preset_name,
+    temperature, top_p, top_k,
+    repetition_penalty, length_penalty,
+    speed, enable_text_splitting,
+    target_min, target_sec
+):
+    if not testo or not testo.strip():
+        raise gr.Error("Inserisci un testo.")
+    if ref_file is None:
+        raise gr.Error("Carica un file audio di riferimento.")
+
+    target_totale = float(target_min) * 60 + float(target_sec)
+    testo_proc    = preprocessa_testo(testo)
+    ref_wav       = prepara_reference(ref_file, denoise=denoise_ref)
+
+    # Latents (con cache opzionale)
+    cache_key = (language, _hash_file(ref_wav))
+    if use_cache and cache_key in _latent_cache:
+        gpt_cond_latent, speaker_embedding = _latent_cache[cache_key]
+    else:
+        gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(audio_path=[ref_wav])
+        if use_cache:
+            _latent_cache[cache_key] = (gpt_cond_latent, speaker_embedding)
+
+    # Wrapper inferenza
+    def _infer(spd):
+        return model.inference(
+            testo_proc, language,
+            gpt_cond_latent, speaker_embedding,
+            temperature=float(temperature),
+            top_p=float(top_p),
+            top_k=int(top_k),
+            repetition_penalty=float(repetition_penalty),
+            length_penalty=float(length_penalty),
+            speed=float(spd),
+            enable_text_splitting=bool(enable_text_splitting),
+        )
+
+    out_path = "/content/output_gradio.wav"
+    avviso   = ""
+    t0       = time.time()
+
+    if target_totale > 0:
+        # STEP 1: genera a speed=1.0 → misura durata naturale
+        out = _infer(1.0)
+        save_wav(wav=out["wav"], path=out_path, sample_rate=SAMPLE_RATE)
+        durata_naturale = durata_wav(out_path)
+
+        # STEP 2: calcola speed necessario
+        speed_calcolato = round(durata_naturale / target_totale, 3)
+
+        if speed_calcolato < SPEED_MIN:
+            speed_finale = SPEED_MIN
+            avviso = (
+                f"⚠️ Testo troppo corto per {int(target_min)}m {int(target_sec)}s. "
+                f"Speed minimo ({SPEED_MIN}) applicato. Aggiungi testo o riduci il target."
+            )
+        elif speed_calcolato > SPEED_MAX:
+            speed_finale = SPEED_MAX
+            avviso = (
+                f"⚠️ Testo troppo lungo per {int(target_min)}m {int(target_sec)}s. "
+                f"Speed massimo ({SPEED_MAX}) applicato. Riduci il testo o aumenta il target."
+            )
+        else:
+            speed_finale = speed_calcolato
+
+        # STEP 3: rigenera solo se lo speed è cambiato significativamente
+        if abs(speed_finale - 1.0) > 0.02:
+            out = _infer(speed_finale)
+            save_wav(wav=out["wav"], path=out_path, sample_rate=SAMPLE_RATE)
+
+    else:
+        # Nessun target → speed manuale dallo slider
+        out = _infer(speed)
+        save_wav(wav=out["wav"], path=out_path, sample_rate=SAMPLE_RATE)
+        speed_finale = speed
+
+    if do_postprocess:
+        postprocessa_output(out_path)
+
+    durata_finale = durata_wav(out_path)
+    tempo_tot     = time.time() - t0
+
+    # Messaggio info
+    if target_totale > 0:
+        delta = durata_finale - target_totale
+        target_str = f"{int(target_min)}m {int(target_sec)}s"
+        riga_durata = f"output: {durata_finale:.1f}s | target: {target_str} | delta: {delta:+.1f}s"
+    else:
+        riga_durata = f"output: {durata_finale:.1f}s"
+
+    info = f"✅ {tempo_tot:.1f}s | {riga_durata} | speed: {speed_finale} | preset: {preset_name}"
+    if avviso:
+        info = avviso + "\n" + info
+
+    return out_path, testo_proc, info
+
+# ══════════════════════════════════════════════
+# 7. INTERFACCIA GRADIO
+# ══════════════════════════════════════════════
+with gr.Blocks(title="XTTS v2 — Voice Cloning Pro") as ui:
+
+    gr.Markdown("# 🎙️ XTTS v2 — Voice Cloning Pro (IT)")
+    gr.Markdown(
+        "Carica WAV o MP3 anche lungo: estrae automaticamente il segmento migliore da 20s. "
+        "Imposta il target durata per adattare automaticamente la velocità del parlato."
+    )
