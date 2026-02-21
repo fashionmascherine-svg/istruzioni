@@ -1,0 +1,56 @@
+
+GUIDA VOCE
+
+Ecco il riepilogo "Salva-Vita" rapido e definitivo per trasformare il tuo audio di 15 minuti gratis.
+
+1. Trova la Voce (Voice-Models.com)
+Cerca: Vai su Voice-Models.com e cerca gerry scotti o altro:
+
+https://voice-models.com/?search=italian
+
+link alberto angela: Related URL: https://huggingface.co/antoskyron/albertoangela/resolve/main/albertoangela.zip
+
+Copia il link: Clicca sul modello > Tasto Destro sul pulsantino piccolo "Hugging Face" > Copia indirizzo link (deve finire con .zip).
+
+2. Avvia Applio (Google Colab)
+Apri: Vai su Applio Colab.
+
+https://colab.research.google.com/github/iahispano/applio/blob/master/assets/Applio.ipynb
+
+con ngrok 38fFDbbhyv6k7ngtkGZzcuO8dJo_4qKt28YoJvBeWiRbNLmNd
+
+Clicca:
+
+Tasto "Connetti" (in alto a destra).
+
+Play ▶️ su "Install Applio". (Aspetta la spunta verde ✅).
+
+Play ▶️ su "Run Applio".
+
+Entra: Clicca sul link finale che appare in basso (es. ...gradio.live).
+
+3. Scarica & Imposta (Interfaccia Web)
+Scheda "Download":
+
+Incolla il link .zip copiato prima e premi Download.
+
+Scheda "Inference" (Usa questi settaggi esatti):
+
+Refresh 🔄: Cliccalo e seleziona la voce scaricata dal menu.
+
+Carica Audio: Metti il tuo file da 15 min.
+
+Split Audio: ✅ ATTIVO (Cruciale per non bloccare tutto).
+
+Clean Audio: ✅ ATTIVO (Toglie i rumori di fondo).
+
+Pitch: Imposta a -2 (Rende la voce unica ed evita il copyright).
+
+Search Feature Ratio: 0.75 (Mantiene l'accento professionale).
+
+Protect Voiceless Consonants: Abbassa a 0.33 (Nello screen è 0.5).
+
+
+PREMI CONVERT.
+
+Attendi qualche minuto e scarica il risultato!
