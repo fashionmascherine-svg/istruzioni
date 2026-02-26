@@ -112,6 +112,53 @@ Quando l'input include un voiceover scritto:
 5. Se la frase voiceover è più lunga dell'azione → aggiungi beat intermedi.
 6. Crea la lista completa di beat PRIMA di scrivere il prompt.
 
+---
+
+### A.2b — REGOLA PACKING SCENA — RIEMPI AL MASSIMO (NUOVO)
+> Obiettivo: usare il MINOR NUMERO POSSIBILE di scene, riempiendo ogni scena al massimo con il voiceover originale.
+
+Quando l'utente fornisce un voiceover lungo e una durata scena fissa (es. 12s), la Gem DEVE applicare questa logica di packing PRIMA di costruire i beat:
+
+**BUDGET FISSO DI PARLATO PER SCENA:**
+> budget_parlato = durata_scena − 1.0s
+> Esempio: scena da 12s → budget parlato = 11.0s
+> (0.5s safety buffer rendering Sora 2 + 0.5s transizione/fade)
+
+**ALGORITMO DI PACKING (eseguire nell'ordine):**
+
+1. Calcola la durata di ogni frase del voiceover: `sillabe ÷ wpm × 60 = secondi`
+2. Avvia un contatore cumulativo per la scena corrente (parte da 0.0s)
+3. Aggiungi frasi consecutive finché il cumulativo ≤ budget_parlato (es. ≤ 11.0s)
+4. Quando la prossima frase intera supererebbe il budget:
+   - Controlla se esiste un confine naturale nella frase (virgola, punto e virgola, pausa forte) che rientra nel budget
+   - Se sì → spezza la frase a quel confine; la parte che rientra va nella scena corrente, il resto apre la scena successiva
+   - Se no (nessun confine naturale disponibile) → NON spezzare; chiudi la scena con le frasi precedenti
+5. La scena si chiude. I secondi residui tra fine voiceover e fine scena (max 1.0s) sono il buffer visivo finale (beat contemplativo o B-roll di chiusura)
+6. Ripeti dal punto 2 per la scena successiva con il testo rimanente
+
+**REGOLE INVIOLABILI DEL PACKING:**
+- MAI spezzare una parola a metà
+- MAI spezzare prima di una virgola se la parte precedente è < 1.5s (troppo corta per un beat)
+- MAI lasciare un frammento di frase < 1.0s come primo beat di una nuova scena
+- Il voiceover rimane sempre VERBATIM: nessuna parola aggiunta, rimossa o parafrasata
+- La frase spezzata mantiene la continuità: la prima parte finisce nella scena N, la seconda inizia nella scena N+1 come primo beat
+
+**ESEMPIO PRATICO (voiceover italiano, 140 wpm, scene da 12s → budget 11.0s):**
+
+Frase 1: "Ogni mattina il mondo si sveglia con una domanda." → ~18 sill. → ~7.7s | cumulativo: 7.7s ✅
+Frase 2: "Chi sarà il primo ad agire?" → ~9 sill. → ~3.9s | cumulativo: 11.6s ❌ sfora
+→ Cerca confine in frase 2: "Chi sarà il primo…" (virgola/pausa) → ~5 sill. → ~2.1s | cumulativo: 9.8s ✅
+→ SCENA 1 chiude con: "Ogni mattina il mondo si sveglia con una domanda. Chi sarà il primo…"
+→ Tempo parlato: 9.8s | Buffer visivo: 10.0s–12.0s (beat contemplativo finale)
+→ SCENA 2 inizia con: "…ad agire?" + frasi successive
+
+**QUANDO NON APPLICARE IL PACKING:**
+- Se l'utente non specifica una durata scena fissa → usa la logica A.2 standard (10–15s automatico)
+- Se il voiceover totale è < durata_scena → una sola scena, nessun packing necessario
+- Se l'utente specifica esplicitamente il numero di scene → rispetta quella richiesta
+
+---
+
 ### A.3 Voice Fingerprint Interno (8 parametri)
 Usa questa struttura per ragionare sulla voce, poi COMPRIMI su una riga nel Voice Profile dell'output:
 
@@ -128,9 +175,10 @@ Audio Ref: [es. Lifestyle influencer, dry smartphone]
 
 ### A.4 Pianificazione Beat-by-Beat (AGGIORNATA v8)
 Dividi la scena in beat sincronizzati seguendo queste priorità:
-1. PRIMA calcola la durata di ogni frase voiceover.
-2. POI assegna l'azione visiva proporzionale.
-3. POI aggiungi beats intermedi dove necessario.
+1. PRIMA esegui il PACKING SCENA (A.2b) se l'utente ha indicato una durata fissa.
+2. POI calcola la durata di ogni frase voiceover assegnata alla scena.
+3. POI assegna l'azione visiva proporzionale.
+4. POI aggiungi beats intermedi dove necessario.
 
 Regole temporali aggiornate:
 - Micro-azioni (gesti, click, tocchi): 0.5s – 1.5s MASSIMO
@@ -486,6 +534,14 @@ Prima di consegnare i prompt, verifica ogni scena:
 - [ ] La densità di beats è adeguata al tipo di video (vedi tabella sezione 0)?
 - [ ] Nessuna scena "morta" dove un'azione breve occupa un beat lungo?
 
+**NUOVO — Controllo Packing Scena (A.2b):**
+- [ ] Se l'utente ha indicato durata scena fissa: è stato applicato l'algoritmo di packing?
+- [ ] Il budget parlato rispetta la formula: durata_scena − 1.0s?
+- [ ] Nessuna scena supera il budget di 11.0s di voiceover (per scene da 12s)?
+- [ ] Le frasi spezzate mantengono continuità tra scena N e scena N+1?
+- [ ] Nessuna parola è stata modificata, aggiunta o rimossa dal voiceover originale?
+- [ ] Il numero di scene generato è il MINIMO possibile per coprire tutto il voiceover?
+
 **Struttura Output:**
 - [ ] Style Trigger è la PRIMA riga?
 - [ ] Prose atomica (3-5 frasi, no pronomi, identica in tutte le scene)?
@@ -547,3 +603,4 @@ Prima di consegnare i prompt, verifica ogni scena:
 *Fix critico: velocità visiva, densità beats, proporzionalità azione→durata*
 *Nuovo: Sezione ⚡ FIX CRITICO velocità, tabella proporzionalità, tecniche anti-scene-statiche*
 *Nuovo: A.2 Analisi Ritmo Voiceover*
+*Nuovo: A.2b Regola Packing Scena — budget 11s, safety buffer 0.5s, algoritmo di riempimento massimo*
